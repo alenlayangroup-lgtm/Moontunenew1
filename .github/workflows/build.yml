@@ -180,7 +180,9 @@ jobs:
 
       - name: Build Celemony ARA test host
         run: |
-          SDK=build/_deps/ara_sdk-src
+          # Full ARA SDK with its examples (the build only fetched ARA_API and ARA_Library).
+          git clone --depth 1 --branch releases/2.2.0 --recurse-submodules --shallow-submodules https://github.com/Celemony/ARA_SDK.git ara-sdk-full
+          SDK=ara-sdk-full
           cmake -P $SDK/install_vst3sdk.cmake
           CXXFLAGS="-include limits -include cstdint -include cstring" \
             cmake -S $SDK/ARA_Examples -B ara-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DARA_VST3_SDK_DIR=$PWD/$SDK/vst3sdk
@@ -191,3 +193,25 @@ jobs:
           ./ara-build/bin/Release/ARATestHost -vst3 build/MoonTune_artefacts/Release/VST3/MoonTune.vst3/Contents/x86_64-linux/MoonTune.so 2>&1 | tee ara.txt
           if grep -qiE "ARA_ASSERT|violation" ara.txt; then echo "ARA API violations found"; exit 1; fi
           echo "ARA test host: no API violations"
+
+  # ---------------------------------------------------------------------------
+  # Installers on the repository's Releases page (one stable place to download them).
+  release:
+    needs: [windows, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: art
+      - name: Publish "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -R art
+          gh release delete latest -R "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          files=$(find art -type f \( -name '*.exe' -o -name '*.dmg' -o -name 'MoonTune-macOS-plugins.zip' \))
+          gh release create latest -R "$GITHUB_REPOSITORY" --title "MoonTune (latest build)" \
+            --notes "Windows: MoonTune-Windows-Setup.exe. macOS: MoonTune-macOS.dmg (installer inside). Built from ${GITHUB_SHA::7}." \
+            --target "$GITHUB_SHA" $files
