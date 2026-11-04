@@ -203,12 +203,56 @@ void MoonTuneAudioProcessor::updateAuditionRange (double startSeconds, double en
 #if JucePlugin_Enable_ARA
 namespace
 {
+    // Hosts bind an instance with any mix of the three ARA roles. Logic, for example, can give the
+    // instance whose window is open only the editor roles (no playback renderer), so everything
+    // here works from whichever role the host assigned.
+    ARA::PlugIn::DocumentController* anyDocumentController (juce::AudioProcessorARAExtension& ext)
+    {
+        if (auto* r = ext.getPlaybackRenderer()) return r->getDocumentController();
+        if (auto* r = ext.getEditorRenderer())   return r->getDocumentController();
+        if (auto* v = ext.getEditorView())       return v->getDocumentController();
+        return nullptr;
+    }
+
     ARA::PlugIn::HostPlaybackController* hostController (juce::AudioProcessorARAExtension& ext)
     {
-        if (auto* r = ext.getPlaybackRenderer())
-            if (auto* dc = r->getDocumentController())
-                return dc->getHostPlaybackController();
+        if (auto* dc = anyDocumentController (ext))
+            return dc->getHostPlaybackController();
         return nullptr;
+    }
+
+    // The host's audio events this instance edits: the playback renderer's regions; failing that,
+    // the editor renderer's (its regions and region sequences); failing that, when the document
+    // holds a single track, that track's regions.
+    std::vector<juce::ARAPlaybackRegion*> araRegionsFor (juce::AudioProcessorARAExtension& ext)
+    {
+        std::vector<juce::ARAPlaybackRegion*> out;
+        auto add = [&out] (juce::ARAPlaybackRegion* r)
+        {
+            if (r != nullptr && std::find (out.begin(), out.end(), r) == out.end())
+                out.push_back (r);
+        };
+
+        if (auto* pr = ext.getPlaybackRenderer())
+            for (auto* r : pr->getPlaybackRegions()) add (r);
+
+        if (out.empty())
+            if (auto* er = ext.getEditorRenderer())
+            {
+                for (auto* r : er->getPlaybackRegions()) add (r);
+                for (auto* seq : er->getRegionSequences())
+                    for (auto* r : seq->getPlaybackRegions()) add (r);
+            }
+
+        if (out.empty())
+            if (auto* dc = anyDocumentController (ext))
+                if (auto* doc = dc->getDocument<juce::ARADocument>())
+                {
+                    const auto& seqs = doc->getRegionSequences();
+                    if (seqs.size() == 1)
+                        for (auto* r : seqs.front()->getPlaybackRegions()) add (r);
+                }
+        return out;
     }
 }
 #endif
@@ -389,13 +433,13 @@ void MoonTuneAudioProcessor::timerCallback()
 void MoonTuneAudioProcessor::pollAra()
 {
    #if JucePlugin_Enable_ARA
-    auto* pr = getPlaybackRenderer();
-    araActive.store (pr != nullptr);
-    if (pr == nullptr)
+    araActive.store (isBoundToARA());
+    if (! isBoundToARA())
         return;
 
+    const auto regions = araRegionsFor (*this);
     std::vector<AraRegion> now;
-    for (auto* region : pr->getPlaybackRegions())
+    for (auto* region : regions)
     {
         auto* mod = region->getAudioModification();
         auto* source = mod != nullptr ? mod->getAudioSource() : nullptr;
@@ -423,7 +467,7 @@ void MoonTuneAudioProcessor::pollAra()
         return;   // wait until the host has stopped changing things for a moment
 
     std::vector<AraImportJob::Item> items;
-    for (auto* region : pr->getPlaybackRegions())
+    for (auto* region : regions)
     {
         for (const auto& r : araSeen)
         {

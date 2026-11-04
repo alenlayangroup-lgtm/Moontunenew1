@@ -287,6 +287,10 @@ MoonTuneAudioProcessorEditor::MoonTuneAudioProcessorEditor (MoonTuneAudioProcess
     constructed = true;
     sendLookAndFeelChange();   // children created before being added pick up the MoonTune look
 
+    // The editor paints its whole area: opaque, so the host window never composites stale
+    // pixels underneath (on macOS a transparent plug-in view could leave text behind on close).
+    setOpaque (true);
+
     hadNotes = processor.getNoteModel().size() > 0;
     timerCallback();
     startTimerHz (30);
@@ -294,7 +298,13 @@ MoonTuneAudioProcessorEditor::MoonTuneAudioProcessorEditor (MoonTuneAudioProcess
 
 MoonTuneAudioProcessorEditor::~MoonTuneAudioProcessorEditor()
 {
+    // Stop every redraw first and take the view off screen at once, so nothing is painted while
+    // the host is closing the window.
     stopTimer();
+    setVisible (false);
+    for (auto* child : getChildren())
+        if (auto* t = dynamic_cast<juce::Timer*> (child))
+            t->stopTimer();
     setLookAndFeel (nullptr);
 }
 

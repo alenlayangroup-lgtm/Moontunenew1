@@ -316,6 +316,48 @@ void NoteGridView::setSelection (std::set<juce::int64> ids)
     selectionChanged();
 }
 
+void NoteGridView::stepToNote (bool forward)
+{
+    // Reference time: the selected note furthest in the step direction, else the marker / playhead.
+    double ref = locator >= 0.0 ? locator : playhead;
+    bool fromSelection = false;
+    for (const auto& n : notes)
+        if (selection.count (n.id) != 0)
+        {
+            const double t = n.outStart();
+            ref = ! fromSelection ? t : (forward ? std::max (ref, t) : std::min (ref, t));
+            fromSelection = true;
+        }
+
+    const Note* best = nullptr;
+    double bestT = 0.0;
+    for (const auto& n : notes)
+    {
+        if (! isSelectable (n) || ! (breathMode || n.isNote())) continue;
+        const double t = n.outStart();
+        const bool after = forward ? t > ref + 1.0e-4 : t < ref - 1.0e-4;
+        if (! after) continue;
+        if (best == nullptr || (forward ? t < bestT : t > bestT)) { best = &n; bestT = t; }
+    }
+    if (best == nullptr) return;
+
+    const auto id = best->id;
+    const float pitch = displayPitch (*best);
+    setSelection ({ id });
+
+    // Keep the note on screen (time and pitch).
+    auto v = view;
+    const double visible = getWidth() > 0 ? (double) getWidth() / v.pixelsPerSecond : 1.0;
+    if (bestT < v.startSeconds || bestT > v.startSeconds + visible * 0.85)
+        v.startSeconds = std::max (0.0, bestT - visible * 0.25);
+    const float rows = getHeight() > 0 ? (float) getHeight() / v.pixelsPerSemitone : 24.0f;
+    if (pitch > v.topPitch - 1.0f || pitch < v.topPitch - rows + 2.0f)
+        v.topPitch = pitch + rows * 0.5f;
+    setView (v);
+
+    if (onLocate) onLocate (bestT);
+}
+
 void NoteGridView::selectAll()
 {
     std::set<juce::int64> all;
@@ -1591,6 +1633,18 @@ bool NoteGridView::keyPressed (const juce::KeyPress& key)
                 return true;
             }
     }
+    // Note to note: Tab / Shift+Tab or Alt+Right / Alt+Left select the next / previous note and
+    // put the play marker (and, with ARA, the DAW cursor) on its start.
+    const bool tabKey = key.getKeyCode() == juce::KeyPress::tabKey && ! mods.isCommandDown() && ! mods.isAltDown();
+    const bool altArrow = mods.isAltDown() && ! mods.isCommandDown()
+                          && (code == juce::KeyPress::leftKey || code == juce::KeyPress::rightKey);
+    if (tabKey || altArrow)
+    {
+        const bool forward = tabKey ? ! mods.isShiftDown() : code == juce::KeyPress::rightKey;
+        stepToNote (forward);
+        return true;
+    }
+
     if (selection.empty())
         return false;
 

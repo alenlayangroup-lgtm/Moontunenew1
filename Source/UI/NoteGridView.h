@@ -122,6 +122,7 @@ public:
     const std::set<juce::int64>& getSelection() const noexcept { return selection; }
     void setSelection (std::set<juce::int64>);
     void selectAll();
+    void stepToNote (bool forward);   // Tab / Alt+arrows: next / previous note
     std::function<void()> onSelectionChanged;
     std::function<void (const View&)> onViewChanged;
 
