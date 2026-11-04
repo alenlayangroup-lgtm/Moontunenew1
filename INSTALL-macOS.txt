@@ -1,0 +1,19 @@
+MoonTune for macOS (Apple Silicon and Intel)
+
+0. The download from GitHub contains MoonTune-macOS-plugins.zip: double-click it to unpack
+   (this keeps the plug-ins runnable).
+
+1. Copy MoonTune.component to   ~/Library/Audio/Plug-Ins/Components/   (Logic, Studio One / Fender Studio Pro, ...)
+   Copy MoonTune.vst3      to   ~/Library/Audio/Plug-Ins/VST3/         (Studio One / Fender Studio Pro, Cubase, Reaper, ...)
+   (In Finder: Go > Go to Folder... and paste the path.)
+
+2. These builds are signed "ad hoc", not with an Apple Developer ID, so macOS blocks them the first
+   time. Open Terminal and run once:
+
+     xattr -cr ~/Library/Audio/Plug-Ins/Components/MoonTune.component ~/Library/Audio/Plug-Ins/VST3/MoonTune.vst3
+     killall -9 AudioComponentRegistrar
+
+3. Restart the DAW and let it rescan plug-ins (Logic: Plug-in Manager > Reset & Rescan if MoonTune is marked as failed).
+   ARA: Studio One / Fender Studio Pro: right-click the vocal event > Audio > Edit with MoonTune.
+        Logic (Audio Unit): select the region, then choose MoonTune from the ARA section of the
+        channel's audio effect slot.

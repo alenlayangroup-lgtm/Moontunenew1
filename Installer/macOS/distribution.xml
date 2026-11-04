@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>MoonTune</title>
+    <organization>com.moonmusiclabel</organization>
+    <domains enable_localSystem="true"/>
+    <options customize="allow" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <welcome file="welcome.txt"/>
+    <choices-outline>
+        <line choice="au"/>
+        <line choice="vst3"/>
+    </choices-outline>
+    <choice id="au" title="Audio Unit (Logic, GarageBand, Studio One ...)" start_selected="true">
+        <pkg-ref id="com.moonmusiclabel.moontune.au"/>
+    </choice>
+    <choice id="vst3" title="VST3 (Studio One / Fender Studio Pro, Cubase, Reaper ...)" start_selected="true">
+        <pkg-ref id="com.moonmusiclabel.moontune.vst3"/>
+    </choice>
+    <pkg-ref id="com.moonmusiclabel.moontune.au">au.pkg</pkg-ref>
+    <pkg-ref id="com.moonmusiclabel.moontune.vst3">vst3.pkg</pkg-ref>
+</installer-gui-script>

@@ -1,0 +1,9 @@
+MoonTune by Moon Music Label - vocal editor (ARA 2).
+
+The plug-ins are installed for all users:
+  Audio Unit: /Library/Audio/Plug-Ins/Components/MoonTune.component
+  VST3:       /Library/Audio/Plug-Ins/VST3/MoonTune.vst3
+
+After installing, restart your DAW and let it rescan plug-ins.
+ARA: Studio One / Fender Studio Pro - right-click the vocal event > Audio > Edit with MoonTune.
+     Logic - select the region and choose MoonTune from the ARA section of the audio effect slot.

@@ -1,0 +1,193 @@
+name: Build MoonTune (Windows VST3 + macOS AU/VST3, ARA 2)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure (Visual Studio, x64)
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build VST3 and tests
+        run: cmake --build build --config Release --parallel
+
+      # Uploaded right after the build, so the plugin is available even if a later check fails.
+      - name: Upload VST3
+        uses: actions/upload-artifact@v5
+        with:
+          name: MoonTune-Windows-VST3
+          path: build/MoonTune_artefacts/Release/VST3/MoonTune.vst3
+
+      - name: Installer (Inno Setup)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc /DAppVersion=0.3.1 "/DSourceDir=$PWD\build\MoonTune_artefacts\Release\VST3" /O"$PWD\dist" Installer\Windows\MoonTune.iss
+
+      - name: Upload Windows installer
+        continue-on-error: true
+        uses: actions/upload-artifact@v5
+        with:
+          name: MoonTune-Windows-Setup
+          path: dist/MoonTune-Windows-Setup.exe
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # pluginval on Windows can return a non-zero exit code even after reporting SUCCESS,
+      # so the result is taken from its own report: pass only on "SUCCESS" and no failed checks.
+      - name: pluginval (strictness 10)
+        shell: bash
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
+          unzip -o -q pluginval.zip -d pluginval
+          mkdir -p pluginval-logs
+          set +e
+          ./pluginval/pluginval.exe --strictness-level 10 --skip-gui-tests --validate-in-process \
+            --output-dir pluginval-logs \
+            "build/MoonTune_artefacts/Release/VST3/MoonTune.vst3" 2>&1 | tee pluginval-logs/console.txt
+          set -e
+          if grep -q '!!!' pluginval-logs/console.txt; then echo "pluginval reported failed checks"; exit 1; fi
+          if ! grep -qx 'SUCCESS' <(tr -d '\r' < pluginval-logs/console.txt); then echo "pluginval did not report SUCCESS"; exit 1; fi
+          echo "pluginval: all checks passed"
+
+      - name: Upload pluginval log
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: pluginval-log-windows
+          path: pluginval-logs
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tools
+        run: brew install ninja || true
+
+      - name: Configure (universal arm64 + x86_64)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build AU, VST3 and tests
+        run: cmake --build build --parallel 3
+
+      # Ad-hoc signature: required for the plug-ins to load on Apple Silicon. (A Developer ID
+      # signature + notarisation needs an Apple developer account; see BUILD.md.)
+      # Ad-hoc signature: required for the plug-ins to load on Apple Silicon. (A Developer ID
+      # signature + notarisation needs an Apple developer account; see BUILD.md.)
+      - name: Sign (ad hoc) and zip the plug-ins
+        run: |
+          set -e
+          R=build/MoonTune_artefacts/Release
+          codesign --force --deep --sign - $R/AU/MoonTune.component
+          codesign --force --deep --sign - $R/VST3/MoonTune.vst3
+          # zip made with ditto keeps permissions and signatures (GitHub artifacts would lose them)
+          mkdir -p dist/plain
+          ditto $R/AU/MoonTune.component dist/plain/MoonTune.component
+          ditto $R/VST3/MoonTune.vst3 dist/plain/MoonTune.vst3
+          cp INSTALL-macOS.txt dist/plain/
+          ditto -c -k --keepParent dist/plain dist/MoonTune-macOS-plugins.zip
+
+      - name: Upload macOS plug-ins (zip)
+        uses: actions/upload-artifact@v5
+        with:
+          name: MoonTune-macOS-AU-VST3
+          path: dist/MoonTune-macOS-plugins.zip
+
+      - name: Installer (.pkg) in a disk image (.dmg)
+        continue-on-error: true
+        run: |
+          set -e
+          R=build/MoonTune_artefacts/Release
+          mkdir -p pkg/au/Library/Audio/Plug-Ins/Components pkg/vst3/Library/Audio/Plug-Ins/VST3 pkg/out dist/dmg
+          ditto $R/AU/MoonTune.component pkg/au/Library/Audio/Plug-Ins/Components/MoonTune.component
+          ditto $R/VST3/MoonTune.vst3 pkg/vst3/Library/Audio/Plug-Ins/VST3/MoonTune.vst3
+          for f in au vst3; do
+            pkgbuild --analyze --root pkg/$f pkg/$f.plist
+            plutil -replace 0.BundleIsRelocatable -bool NO pkg/$f.plist
+            pkgbuild --root pkg/$f --component-plist pkg/$f.plist --identifier com.moonmusiclabel.moontune.$f \
+                     --version 0.3.1 --install-location / pkg/out/$f.pkg
+          done
+          productbuild --distribution Installer/macOS/distribution.xml --resources Installer/macOS \
+                       --package-path pkg/out dist/dmg/MoonTune.pkg
+          cp Installer/macOS/README.txt dist/dmg/
+          hdiutil create -volname "MoonTune" -srcfolder dist/dmg -ov -format UDZO dist/MoonTune-macOS.dmg
+
+      - name: Upload macOS installer (.dmg)
+        continue-on-error: true
+        uses: actions/upload-artifact@v5
+        with:
+          name: MoonTune-macOS-Installer
+          path: dist/MoonTune-macOS.dmg
+
+      - name: Unit tests
+        continue-on-error: true
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: auval (Audio Unit validation)
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/MoonTune_artefacts/Release/AU/MoonTune.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 3
+          auval -a | grep -i moon || true
+          auval -strict -v aufx MnTn MnML | tee auval.txt
+          grep -q "AU VALIDATION SUCCEEDED" auval.txt
+
+      - name: pluginval (strictness 10, VST3)
+        continue-on-error: true
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
+          unzip -o -q pluginval.zip -d pluginval
+          ./pluginval/pluginval.app/Contents/MacOS/pluginval --strictness-level 10 --skip-gui-tests --validate-in-process \
+            "build/MoonTune_artefacts/Release/VST3/MoonTune.vst3" 2>&1 | tee pluginval.txt
+          ! grep -q '!!!' pluginval.txt
+          grep -qx 'SUCCESS' pluginval.txt
+
+  # ---------------------------------------------------------------------------
+  # ARA 2 compliance: Celemony's ARA test host runs its whole test suite against the plug-in
+  # (document model, archiving, playback rendering, editor view, ...). Linux build of the VST3.
+  ara-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxrender-dev libgl-dev xvfb
+
+      - name: Build MoonTune (VST3, ARA) and tests
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Unit tests
+        run: xvfb-run -a ctest --test-dir build --output-on-failure
+
+      - name: Build Celemony ARA test host
+        run: |
+          SDK=build/_deps/ara_sdk-src
+          cmake -P $SDK/install_vst3sdk.cmake
+          CXXFLAGS="-include limits -include cstdint -include cstring" \
+            cmake -S $SDK/ARA_Examples -B ara-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DARA_VST3_SDK_DIR=$PWD/$SDK/vst3sdk
+          cmake --build ara-build --target ARATestHost --parallel
+
+      - name: ARA test host (all test cases)
+        run: |
+          ./ara-build/bin/Release/ARATestHost -vst3 build/MoonTune_artefacts/Release/VST3/MoonTune.vst3/Contents/x86_64-linux/MoonTune.so 2>&1 | tee ara.txt
+          if grep -qiE "ARA_ASSERT|violation" ara.txt; then echo "ARA API violations found"; exit 1; fi
+          echo "ARA test host: no API violations"
