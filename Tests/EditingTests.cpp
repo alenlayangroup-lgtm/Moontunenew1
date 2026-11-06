@@ -7,6 +7,7 @@
 #include "Analysis/VocalAnalyzer.h"
 #include "TestSignals.h"
 #include "TestHelpers.h"
+#include "DSP/HeldTone.h"
 
 using namespace moontune;
 using namespace moontune::testsignals;
@@ -420,6 +421,16 @@ public:
                 const float minR = *std::min_element (rms.begin(), rms.end());
                 logMessage ("  held note level: min/max over 20 ms windows = " + juce::String (minR / maxR, 3));
                 expectGreaterThan (minR / maxR, 0.6f);
+                // Once held, the sound is static (a frozen moment, not a loop): the level of the
+                // last two seconds does not move.
+                {
+                    const size_t from = rms.size() > 100 ? rms.size() - 100 : 0;
+                    const float mx = *std::max_element (rms.begin() + (long) from, rms.end());
+                    const float mn = *std::min_element (rms.begin() + (long) from, rms.end());
+                    logMessage ("  held part level: min/max = " + juce::String (mn / mx, 4));
+                    expectGreaterThan (mn / mx, 0.97f);
+                    expectGreaterThan (mx, 0.01f);
+                }
                 // Sample-to-sample jumps stay in the range of the signal itself (no clicks at the loop joint).
                 float maxStep = 0.0f, peak = 0.0f;
                 for (size_t i = (size_t) (0.3 * sr) + 1; i < heard.size(); ++i)
@@ -441,6 +452,45 @@ public:
                 for (size_t i = (size_t) (0.06 * sr); i < tail.size(); ++i) tailPeak = std::max (tailPeak, std::abs (tail[i]));
                 expectEquals (tailPeak, 0.0f);   // released within ~40 ms
                 expect (! p.isAuditioning());
+            }
+
+            // HeldTone: continues a harmonic voice in phase and at the same level, and keeps the
+            // spectral envelope (formants) when the pitch moves.
+            {
+                const double tsr = 48000.0, tf0 = 220.0;
+                auto voice = [&] (double t)
+                {
+                    double v = 0.0;
+                    for (int k = 1; k <= 30; ++k)
+                    {
+                        const double f = k * tf0;
+                        const double env = std::exp (-std::pow ((f - 700.0) / 500.0, 2.0)) + 0.5 * std::exp (-std::pow ((f - 1200.0) / 400.0, 2.0)) + 0.02;
+                        v += 0.1 * env * std::cos (2.0 * juce::MathConstants<double>::pi * f * t + 0.7 * k * k);
+                    }
+                    return (float) v;
+                };
+                const int win = (int) std::lround (4.0 * tsr / tf0);
+                std::vector<float> x ((size_t) win);
+                for (int i = 0; i < win; ++i) x[(size_t) i] = voice (i / tsr);
+                HeldTone tone;
+                expect (tone.analyse (x.data(), win, tf0, tsr));
+                std::vector<float> y (2400);
+                tone.render (y.data(), (int) y.size());
+                double err = 0.0, ref = 0.0;
+                for (int i = 0; i < 2400; ++i)
+                {
+                    const double rv = voice ((win + i) / tsr);
+                    err += (y[(size_t) i] - rv) * (y[(size_t) i] - rv);
+                    ref += rv * rv;
+                }
+                const double snr = 10.0 * std::log10 (ref / std::max (err, 1.0e-20));
+                logMessage ("  held tone continuation SNR: " + juce::String (snr, 1) + " dB");
+                expectGreaterThan (snr, 25.0);
+
+                std::vector<float> noise ((size_t) win);
+                juce::Random rnd (7);
+                for (auto& v : noise) v = rnd.nextFloat() - 0.5f;
+                expect (! tone.analyse (noise.data(), win, tf0, tsr));   // noise is not held
             }
 
             // Preview inside MoonTune (no ARA): plays the edited vocal from 1.0 s while the DAW is stopped.
