@@ -106,8 +106,8 @@ public:
     bool isTimeVisible (double seconds, double marginFraction = 0.0) const noexcept;
 
     // Callbacks
-    std::function<void (double outStart, double outEnd)> onAuditionNote;  // a note was grabbed
-    std::function<void (double outStart, double outEnd)> onAuditionMove;  // the grabbed note moved
+    std::function<void (double outStart, double outEnd, float pitch)> onAuditionNote;  // a note was grabbed
+    std::function<void (double outStart, double outEnd, float pitch)> onAuditionMove;  // the grabbed note moved
     std::function<void()> onAuditionStop;                                 // released
     std::function<void (int pitchClass)> onTogglePitchClass;               // pitch ruler right-click
     std::function<void()> onResetScaleEdits;

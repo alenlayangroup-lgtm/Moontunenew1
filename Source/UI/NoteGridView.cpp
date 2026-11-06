@@ -1272,7 +1272,7 @@ void NoteGridView::mouseDown (const juce::MouseEvent& e)
             history->beginGesture();
         if (onAuditionNote)
             if (const auto* n = findNote (notes, id))
-                onAuditionNote (n->outStart(), n->outEnd());
+                onAuditionNote (n->outStart(), n->outEnd(), displayPitch (*n));
         return;
     }
 
@@ -1319,14 +1319,14 @@ void NoteGridView::mouseDown (const juce::MouseEvent& e)
         history->beginGesture();
     if (onAuditionNote)
         if (const auto* n = findNote (notes, id))
-            onAuditionNote (n->outStart(), n->outEnd());
+            onAuditionNote (n->outStart(), n->outEnd(), displayPitch (*n));
 }
 
 void NoteGridView::auditionDragged()
 {
     if (onAuditionMove)
         if (const auto* n = findNote (notes, dragNoteId))
-            onAuditionMove (n->outStart(), n->outEnd());
+            onAuditionMove (n->outStart(), n->outEnd(), displayPitch (*n));
 }
 
 void NoteGridView::showScaleMenu (int pc)

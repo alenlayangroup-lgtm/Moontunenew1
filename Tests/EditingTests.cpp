@@ -388,6 +388,61 @@ public:
                 expectEquals (tailPeak, 0.0f);
             }
 
+            // Held note (sustain, like Melodyne): one continuous vowel at the edited pitch for as long
+            // as it is held, with no "la-la-la" level dips, then a short release.
+            {
+                const auto n1 = p.getNoteModel().getSnapshot()[1];
+                p.startAudition (n1.outStart(), n1.outEnd(), true, 65.0f);
+                std::vector<float> heard;
+                juce::AudioBuffer<float> b (1, 512);
+                juce::MidiBuffer midi;
+                head.playing = false;
+                const int holdBlocks = (int) (3.0 * sr / 512.0);   // 3 s, several times the note length
+                for (int k = 0; k < holdBlocks; ++k)
+                {
+                    b.clear();
+                    p.processBlock (b, midi);
+                    heard.insert (heard.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                expect (p.isAuditioning());
+                auto ra = VocalAnalyzer::analyseBuffer (heard.data(), (int) heard.size(), sr);
+                expectWithinAbsoluteError (medianPitch (ra, 0.2, 2.9), 65.0f, 0.15f);
+                // Level in 20 ms windows after the onset: no dips (a re-attacked loop would fall towards 0).
+                const int w = (int) (0.02 * sr);
+                std::vector<float> rms;
+                for (size_t i = (size_t) (0.3 * sr); i + (size_t) w <= heard.size(); i += (size_t) w)
+                {
+                    double e = 0.0;
+                    for (int j = 0; j < w; ++j) e += (double) heard[i + (size_t) j] * heard[i + (size_t) j];
+                    rms.push_back ((float) std::sqrt (e / w));
+                }
+                const float maxR = *std::max_element (rms.begin(), rms.end());
+                const float minR = *std::min_element (rms.begin(), rms.end());
+                logMessage ("  held note level: min/max over 20 ms windows = " + juce::String (minR / maxR, 3));
+                expectGreaterThan (minR / maxR, 0.6f);
+                // Sample-to-sample jumps stay in the range of the signal itself (no clicks at the loop joint).
+                float maxStep = 0.0f, peak = 0.0f;
+                for (size_t i = (size_t) (0.3 * sr) + 1; i < heard.size(); ++i)
+                {
+                    maxStep = std::max (maxStep, std::abs (heard[i] - heard[i - 1]));
+                    peak = std::max (peak, std::abs (heard[i]));
+                }
+                expectLessThan (maxStep, peak * 0.5f);
+
+                p.stopAudition();
+                std::vector<float> tail;
+                for (int k = 0; k < 20; ++k)
+                {
+                    b.clear();
+                    p.processBlock (b, midi);
+                    tail.insert (tail.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                float tailPeak = 0.0f;
+                for (size_t i = (size_t) (0.06 * sr); i < tail.size(); ++i) tailPeak = std::max (tailPeak, std::abs (tail[i]));
+                expectEquals (tailPeak, 0.0f);   // released within ~40 ms
+                expect (! p.isAuditioning());
+            }
+
             // Preview inside MoonTune (no ARA): plays the edited vocal from 1.0 s while the DAW is stopped.
             {
                 p.startPreview (1.0);

@@ -239,12 +239,12 @@ MoonTuneAudioProcessorEditor::MoonTuneAudioProcessorEditor (MoonTuneAudioProcess
 
     grid.setHistory (&p.getHistory());
     grid.onUserNavigated = [this] { followSuspended = true; };
-    grid.onAuditionNote = [this] (double a, double b)
+    grid.onAuditionNote = [this] (double a, double b, float pitch)
     {
         if (processor.isAuditionEnabled() && ! processor.isHostPlaying())
-            processor.startAudition (a, b, true);
+            processor.startAudition (a, b, true, pitch);
     };
-    grid.onAuditionMove = [this] (double a, double b) { processor.updateAuditionRange (a, b); };
+    grid.onAuditionMove = [this] (double a, double b, float pitch) { processor.updateAuditionRange (a, b, pitch); };
     grid.onAuditionStop = [this] { processor.stopAudition(); };
     grid.onTogglePitchClass = [this] (int pc)
     {
