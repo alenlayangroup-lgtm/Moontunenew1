@@ -5,6 +5,7 @@
 #include "Analysis/VocalAnalyzer.h"
 #include "DSP/VocalRenderer.h"
 #include "Capture/TakeAudio.h"
+#include "DSP/HeldTone.h"
 #include <cstdlib>
 
 using namespace moontune;
@@ -34,6 +35,51 @@ public:
         take.write (0, buf.getReadPointer (0), buf.getNumSamples());
         const auto analysis = VocalAnalyzer::analyse (take);
 
+        // Held-note demo (MOONTUNE_HOLD_OUT=<wav>): the three longest notes, each held 2.5 s the way
+        // the audition holds them (onset once, then the frozen moment through the same HeldTone).
+        if (const char* holdOut = std::getenv ("MOONTUNE_HOLD_OUT"))
+        {
+            auto sorted = analysis.notes;
+            std::sort (sorted.begin(), sorted.end(), [] (const auto& a, const auto& b)
+                       { return a.endSeconds - a.startSeconds > b.endSeconds - b.startSeconds; });
+            std::vector<float> out;
+            const float* x = buf.getReadPointer (0);
+            for (size_t ni = 0; ni < std::min<size_t> (3, sorted.size()); ++ni)
+            {
+                const auto& a = sorted[ni];
+                const double f0 = 440.0 * std::pow (2.0, (a.pitch - 69.0) / 12.0);
+                const auto start = (juce::int64) (a.startSeconds * sr), end = (juce::int64) (a.endSeconds * sr);
+                const auto window = (juce::int64) std::llround (4.0 * sr / f0);
+                const auto holdAt = start + std::max<juce::int64> (window + (juce::int64) (0.015 * sr), (juce::int64) (0.4 * (double) (end - start)));
+                const auto xfade = std::min<juce::int64> ((juce::int64) (0.030 * sr), end - holdAt);
+                HeldTone tone;
+                const bool ok = tone.analyse (x + holdAt - window, (int) window, f0, sr);
+                logMessage (juce::String::formatted ("  hold note %.3f-%.3f pitch %.2f: %s", a.startSeconds, a.endSeconds, a.pitch, ok ? "held" : "not periodic"));
+                const auto total = (juce::int64) (2.5 * sr);
+                std::vector<float> t ((size_t) total);
+                if (ok) tone.render (t.data(), (int) (total - (holdAt - start)));
+                for (juce::int64 i = 0; i < total; ++i)
+                {
+                    const auto pos = start + i;
+                    const float real = pos < end ? x[pos] : 0.0f;
+                    float w = 0.0f;
+                    if (ok && pos >= holdAt) w = pos >= holdAt + xfade ? 1.0f : (float) std::pow (std::sin ((double) (pos - holdAt) / (double) xfade * 1.5707963), 2.0);
+                    const float tv = (ok && pos >= holdAt) ? t[(size_t) (pos - holdAt)] : 0.0f;
+                    float g = i < (juce::int64) (0.015 * sr) ? (float) i / (float) (0.015 * sr) : 1.0f;
+                    if (total - i < (juce::int64) (0.04 * sr)) g *= (float) (total - i) / (float) (0.04 * sr);
+                    if (! ok && pos >= end) g = 0.0f;
+                    out.push_back ((real * (1.0f - w) + tv * w) * g);
+                }
+                out.insert (out.end(), (size_t) (0.4 * sr), 0.0f);
+            }
+            juce::AudioBuffer<float> ob (1, (int) out.size());
+            for (size_t i = 0; i < out.size(); ++i) ob.setSample (0, (int) i, out[i]);
+            juce::File f (holdOut); f.deleteFile();
+            juce::WavAudioFormat wavFmt;
+            std::unique_ptr<juce::AudioFormatWriter> wr (wavFmt.createWriterFor (new juce::FileOutputStream (f), sr, 1, 32, {}, 0));
+            if (wr != nullptr) wr->writeFromAudioSampleBuffer (ob, 0, ob.getNumSamples());
+        }
+
         std::vector<std::pair<double, double>> curve;
         for (auto line : juce::StringArray::fromLines (juce::File (edits).loadFileAsString()))
         {
@@ -51,6 +97,24 @@ public:
             if (std::abs (n.pitchShiftCents) < 6.0f) n.pitchShiftCents = 0.0f;
             logMessage (juce::String::formatted ("  note %.3f-%.3f  pitch %.2f  shift %+.0f c", a.startSeconds, a.endSeconds, a.pitch, n.pitchShiftCents));
             notes.push_back (n);
+        }
+
+        // Pencil demo (MOONTUNE_REAL_DRAW=1): on the three longest notes a straight drawn line from the
+        // note's pitch at its start rising one semitone to its end (vibrato replaced by the line).
+        if (std::getenv ("MOONTUNE_REAL_DRAW") != nullptr)
+        {
+            std::vector<size_t> order (notes.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::sort (order.begin(), order.end(), [&] (size_t a, size_t b) { return notes[a].duration() > notes[b].duration(); });
+            for (size_t k = 0; k < std::min<size_t> (3, order.size()); ++k)
+            {
+                auto& n = notes[order[k]];
+                const auto frames = (size_t) std::ceil (n.duration() / Note::drawHop) + 1;
+                n.drawnCents.resize (frames);
+                for (size_t i = 0; i < frames; ++i)
+                    n.drawnCents[i] = 100.0f * (float) i / (float) (frames - 1) - 50.0f;
+                logMessage (juce::String::formatted ("  pencil line on note %.3f-%.3f", n.startSeconds, n.endSeconds));
+            }
         }
 
         for (const auto& nz : analysis.noise)

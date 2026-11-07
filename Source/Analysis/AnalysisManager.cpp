@@ -262,9 +262,14 @@ void AnalysisManager::mergeNotes (const AnalysisResult& r, double from, double t
     auto existing = noteModel.getSnapshot();
     std::vector<Note> merged;
 
+    // Same rule for old and new objects (by their middle), so an object that only touches the
+    // edge of the re-captured range is neither lost nor duplicated.
     for (const auto& n : existing)
-        if (n.endSeconds <= from || n.startSeconds >= to)   // outside the re-captured range: keep
+    {
+        const double mid = 0.5 * (n.startSeconds + n.endSeconds);
+        if (mid < from || mid > to)   // outside the re-captured range: keep
             merged.push_back (n);
+    }
 
     juce::int64 nextId = noteModel.nextFreeId();
     for (const auto& a : r.notes)

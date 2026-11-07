@@ -44,11 +44,13 @@ class NoteGridView final : public juce::Component
 {
 public:
     // Mouse tools: Edit (pitch / time / length / handles), Split (scissors: click cuts the note
-    // there), Gain (drag a note up / down: louder / quieter).
-    enum class Tool { edit, split, gain };
+    // there), Gain (drag a note up / down: louder / quieter), Pencil (draw the pitch curve freely,
+    // like Auto-Tune's graphical mode; Ctrl/Cmd+drag erases). Right-click on an empty spot opens
+    // the tool menu.
+    enum class Tool { edit, split, gain, pencil };
     void setTool (Tool);
     Tool getTool() const noexcept { return tool; }
-    std::function<void (Tool)> onToolChanged;   // changed from the keyboard (E / S / G)
+    std::function<void (Tool)> onToolChanged;   // changed from the keyboard (E / S / G / P) or the menu
 
     // BREATH mode: only breaths / consonants can be clicked and lassoed (notes are left alone);
     // turning it on selects every breath.
@@ -106,8 +108,8 @@ public:
     bool isTimeVisible (double seconds, double marginFraction = 0.0) const noexcept;
 
     // Callbacks
-    std::function<void (double outStart, double outEnd)> onAuditionNote;  // a note was grabbed
-    std::function<void (double outStart, double outEnd)> onAuditionMove;  // the grabbed note moved
+    std::function<void (double outStart, double outEnd, float pitch)> onAuditionNote;  // a note was grabbed
+    std::function<void (double outStart, double outEnd, float pitch)> onAuditionMove;  // the grabbed note moved
     std::function<void()> onAuditionStop;                                 // released
     std::function<void (int pitchClass)> onTogglePitchClass;               // pitch ruler right-click
     std::function<void()> onResetScaleEdits;
@@ -159,7 +161,11 @@ public:
 
 private:
     enum class Drag { none, pan, pending, pitch, time, startEdge, endEdge, lasso, modHandle, driftHandle, gain,
-                      tiltHandle, transitionHandle };
+                      tiltHandle, transitionHandle, pencil };
+    juce::Point<float> pencilLast;             // last pencil point (output seconds, MIDI pitch)
+    void applyPencil (juce::Point<float> from, juce::Point<float> to, bool erase);
+    void showToolMenu();
+    void eraseDrawing (const std::set<juce::int64>& ids);
     enum class Hit { none, body, startEdge, endEdge, modHandle, driftHandle, tiltHandle, transitionHandle };
     bool handleRects (const Note&, juce::Rectangle<float>& mod, juce::Rectangle<float>& drift) const;
     juce::Rectangle<float> tiltHandleRect (const Note&) const;

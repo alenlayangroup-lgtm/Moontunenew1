@@ -11,6 +11,7 @@
 #include "Capture/AudioCapture.h"
 #include "Analysis/AnalysisManager.h"
 #include "DSP/RenderManager.h"
+#include "DSP/HeldTone.h"
 #include "Model/EditHistory.h"
 #include "ARA/MoonTuneARA.h"
 
@@ -124,10 +125,12 @@ public:
     bool isAuditionEnabled() const noexcept;
 
     // Note audition (message thread): plays [startSeconds, endSeconds) of the edited vocal while the
-    // host is stopped, looping while `loop` is set, until stopAudition().
-    void startAudition (double startSeconds, double endSeconds, bool loop);
+    // host is stopped, until stopAudition(). With `sustain` (a held note, like Melodyne) the onset
+    // plays once and then one steady moment of the voice is held as a frozen harmonic tone at
+    // `pitch` (MIDI, the edited pitch): "laaaa", no loop.
+    void startAudition (double startSeconds, double endSeconds, bool sustain, float pitch = 0.0f);
     void stopAudition();
-    void updateAuditionRange (double startSeconds, double endSeconds);   // keeps playing
+    void updateAuditionRange (double startSeconds, double endSeconds, float pitch = 0.0f);   // keeps playing
 
     // Host transport through ARA (false if this instance has no ARA playback control).
     bool requestHostLocate (double seconds);   // move the playhead
@@ -219,6 +222,10 @@ private:
 
     // Audition
     std::atomic<bool> auditionActive { false }, auditionLoop { false }, previewMode { false };
+    std::atomic<float> auditionPitch { 0.0f };
+    juce::AudioBuffer<float> auditionHistory, analysisBuffer, toneBuffer;   // held note (preallocated)
+    HeldTone heldTone;                                                      // audio thread
+    bool renderAudition (juce::AudioBuffer<float>& buffer, int numOut, int offset, int len, juce::int64 pos);
     std::atomic<double> auditionSeconds { 0.0 };
     std::atomic<juce::int64> auditionStart { 0 }, auditionEnd { 0 };
     std::atomic<juce::uint32> auditionRequest { 0 };

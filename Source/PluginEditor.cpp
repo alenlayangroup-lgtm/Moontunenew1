@@ -197,7 +197,7 @@ MoonTuneAudioProcessorEditor::MoonTuneAudioProcessorEditor (MoonTuneAudioProcess
     addAndMakeVisible (showAllButton);
 
     // Tools
-    for (auto* b : { &editToolButton, &splitToolButton, &gainToolButton })
+    for (auto* b : { &editToolButton, &splitToolButton, &gainToolButton, &pencilToolButton })
     {
         styleButton (*b, Colours::accent);
         b->setClickingTogglesState (false);
@@ -209,6 +209,9 @@ MoonTuneAudioProcessorEditor::MoonTuneAudioProcessorEditor (MoonTuneAudioProcess
     editToolButton.onClick = [this] { setTool (NoteGridView::Tool::edit); };
     splitToolButton.onClick = [this] { setTool (NoteGridView::Tool::split); };
     gainToolButton.onClick = [this] { setTool (NoteGridView::Tool::gain); };
+    pencilToolButton.setTooltip ("Pencil (P): draw the pitch curve over the notes, like Auto-Tune's graph mode. "
+                                 "Ctrl/Cmd+drag erases. Right-click an empty spot for all tools.");
+    pencilToolButton.onClick = [this] { setTool (NoteGridView::Tool::pencil); };
     editToolButton.setToggleState (true, juce::dontSendNotification);
     grid.onToolChanged = [this] (NoteGridView::Tool t) { setTool (t); };
 
@@ -239,12 +242,12 @@ MoonTuneAudioProcessorEditor::MoonTuneAudioProcessorEditor (MoonTuneAudioProcess
 
     grid.setHistory (&p.getHistory());
     grid.onUserNavigated = [this] { followSuspended = true; };
-    grid.onAuditionNote = [this] (double a, double b)
+    grid.onAuditionNote = [this] (double a, double b, float pitch)
     {
         if (processor.isAuditionEnabled() && ! processor.isHostPlaying())
-            processor.startAudition (a, b, true);
+            processor.startAudition (a, b, true, pitch);
     };
-    grid.onAuditionMove = [this] (double a, double b) { processor.updateAuditionRange (a, b); };
+    grid.onAuditionMove = [this] (double a, double b, float pitch) { processor.updateAuditionRange (a, b, pitch); };
     grid.onAuditionStop = [this] { processor.stopAudition(); };
     grid.onTogglePitchClass = [this] (int pc)
     {
@@ -372,6 +375,7 @@ void MoonTuneAudioProcessorEditor::setTool (NoteGridView::Tool t)
     editToolButton.setToggleState (t == NoteGridView::Tool::edit, juce::dontSendNotification);
     splitToolButton.setToggleState (t == NoteGridView::Tool::split, juce::dontSendNotification);
     gainToolButton.setToggleState (t == NoteGridView::Tool::gain, juce::dontSendNotification);
+    pencilToolButton.setToggleState (t == NoteGridView::Tool::pencil, juce::dontSendNotification);
 }
 
 // Peaks of the recorded vocal for the waveform behind the notes (rebuilt when the take changes,
@@ -820,6 +824,7 @@ void MoonTuneAudioProcessorEditor::resized()
     editToolButton.setBounds (nav.removeFromLeft (52));
     splitToolButton.setBounds (nav.removeFromLeft (56));
     gainToolButton.setBounds (nav.removeFromLeft (54));
+    pencilToolButton.setBounds (nav.removeFromLeft (64));
     nav.removeFromLeft (6);
     breathButton.setBounds (nav.removeFromLeft (66));
     nav.removeFromLeft (4);

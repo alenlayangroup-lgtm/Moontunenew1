@@ -60,6 +60,15 @@ struct Note
     float  pitchTilt = 0.0f;         // cents from start to end added as a straight slope (0 = none)
     float  transitionMs = -1.0f;     // glide from the previous note into this one (-1 = natural default)
 
+    // Pitch drawn with the pencil (like Auto-Tune's graphical mode): one value per drawHop of the
+    // note's source audio from startSeconds, in cents relative to the note's centre (so it moves
+    // with the note); NaN where nothing is drawn. Where drawn it replaces the sung pitch curve.
+    static constexpr double drawHop = 0.005;
+    std::vector<float> drawnCents;
+    bool  hasDrawing() const noexcept;
+    float drawnAt (double sourceSeconds) const noexcept;       // NaN where not drawn
+    float drawnWeight (double sourceSeconds) const noexcept;   // 0..1, soft 20 ms edges of a drawn stretch
+
     // --- Time ------------------------------------------------------------------
     double timeShiftSeconds = 0.0;   // move of the whole note
     double startEditSeconds = 0.0;   // extra move of the start edge (stretches the note)
@@ -102,6 +111,8 @@ public:
     static constexpr float  maxPitchShiftCents = 2400.0f;   // +-2 octaves
     static constexpr double maxTimeShiftSeconds = 60.0;
     static constexpr double minNoteSeconds = 0.02;
+
+    static constexpr float maxDrawnCents = 2400.0f;
 
     std::vector<Note> getSnapshot() const;
     void replaceAll (std::vector<Note> notes);

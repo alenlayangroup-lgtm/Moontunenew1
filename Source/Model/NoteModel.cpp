@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <locale>
@@ -28,6 +29,7 @@ namespace ids
     static const juce::Identifier corr        { "corr" };
     static const juce::Identifier corrDrift   { "corrDrift" };
     static const juce::Identifier corrSpeed   { "corrSpeed" };
+    static const juce::Identifier drawn       { "drawn" };
     static const juce::Identifier kind        { "kind" };
     static const juce::Identifier tilt        { "tilt" };
     static const juce::Identifier transition  { "transition" };
@@ -143,10 +145,57 @@ bool NoteEq::operator== (const NoteEq& o) const noexcept
 
 // --- Note -------------------------------------------------------------------------
 
+static bool sameDrawing (const std::vector<float>& a, const std::vector<float>& b) noexcept
+{
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::isfinite (a[i]) != std::isfinite (b[i]) || (std::isfinite (a[i]) && std::abs (a[i] - b[i]) > 1.0e-3f))
+            return false;
+    return true;
+}
+
 bool Note::hasTimeEdit() const noexcept
 {
     return std::abs (timeShiftSeconds) > 1.0e-6 || std::abs (startEditSeconds) > 1.0e-6
         || std::abs (endEditSeconds) > 1.0e-6;
+}
+
+bool Note::hasDrawing() const noexcept
+{
+    for (float v : drawnCents)
+        if (std::isfinite (v)) return true;
+    return false;
+}
+
+float Note::drawnAt (double sourceSeconds) const noexcept
+{
+    const double pos = (sourceSeconds - startSeconds) / drawHop;
+    const long i = (long) std::floor (pos);
+    if (i < 0 || i >= (long) drawnCents.size()) return std::numeric_limits<float>::quiet_NaN();
+    const float a = drawnCents[(size_t) i];
+    if (! std::isfinite (a)) return a;
+    if (i + 1 >= (long) drawnCents.size() || ! std::isfinite (drawnCents[(size_t) i + 1])) return a;
+    return a + (drawnCents[(size_t) i + 1] - a) * (float) (pos - (double) i);
+}
+
+float Note::drawnWeight (double sourceSeconds) const noexcept
+{
+    const long i = (long) std::lround ((sourceSeconds - startSeconds) / drawHop);
+    if (i < 0 || i >= (long) drawnCents.size() || ! std::isfinite (drawnCents[(size_t) i])) return 0.0f;
+    constexpr int edge = 4;   // 4 x 5 ms
+    int dist = edge;
+    for (int d = 1; d <= edge; ++d)
+    {
+        const long l = i - d, r = i + d;
+        // An undrawn neighbour inside the note is an edge; the note's own ends are not (the
+        // drawn curve holds right up to them).
+        const long frames = (long) std::ceil ((endSeconds - startSeconds) / drawHop) + 1;
+        const bool lEdge = l >= 0 && ! std::isfinite (drawnCents[(size_t) l]);
+        const bool rEdge = r < frames && (r >= (long) drawnCents.size() || ! std::isfinite (drawnCents[(size_t) r]));
+        if (lEdge || rEdge) { dist = d - 1; break; }
+    }
+    const float x = (float) (dist + 1) / (float) (edge + 1);
+    return 0.5f - 0.5f * std::cos (3.14159265f * std::min (1.0f, x));
 }
 
 bool Note::hasCorrection() const noexcept
@@ -159,7 +208,7 @@ bool Note::hasSoundEdit() const noexcept
     return std::abs (pitchShiftCents) > 0.01f || std::abs (pitchModulation - 1.0f) > 0.001f
         || std::abs (pitchDrift - 1.0f) > 0.001f || std::abs (formantCents) > 0.01f
         || std::abs (pitchTilt) > 0.01f || transitionMs >= 0.0f
-        || std::abs (gainDb) > 0.001f || eq.isActive() || hasTimeEdit() || hasCorrection();
+        || std::abs (gainDb) > 0.001f || eq.isActive() || hasTimeEdit() || hasCorrection() || hasDrawing();
 }
 
 bool Note::operator== (const Note& o) const noexcept
@@ -174,7 +223,7 @@ bool Note::operator== (const Note& o) const noexcept
         && same (endEditSeconds, o.endEditSeconds)
         && same (formantCents, o.formantCents) && same (gainDb, o.gainDb) && eq == o.eq
         && same (correctionCents, o.correctionCents) && same (correctionDrift, o.correctionDrift)
-        && same (correctionSpeedMs, o.correctionSpeedMs);
+        && same (correctionSpeedMs, o.correctionSpeedMs) && sameDrawing (drawnCents, o.drawnCents);
 }
 
 // --- Model ------------------------------------------------------------------------
@@ -202,6 +251,14 @@ void NoteModel::clampEdits (Note& n) noexcept
     n.correctionCents  = clampFinite (n.correctionCents, -1200.0f, 1200.0f, 0.0f);
     n.correctionDrift  = clampFinite (n.correctionDrift, 0.0f, 1.0f, 0.0f);
     n.correctionSpeedMs = clampFinite (n.correctionSpeedMs, 0.0f, 1000.0f, 0.0f);
+    {
+        const auto frames = (size_t) std::ceil (std::max (0.0, n.endSeconds - n.startSeconds) / Note::drawHop) + 1;
+        if (n.drawnCents.size() > frames) n.drawnCents.resize (frames);
+        for (auto& v : n.drawnCents)
+            if (std::isfinite (v)) v = juce::jlimit (-maxDrawnCents, maxDrawnCents, v);
+            else v = std::numeric_limits<float>::quiet_NaN();
+        if (! n.hasDrawing()) n.drawnCents.clear();
+    }
 
     if (! std::isfinite (n.timeShiftSeconds)) n.timeShiftSeconds = 0.0;
     if (! std::isfinite (n.startEditSeconds)) n.startEditSeconds = 0.0;
@@ -301,6 +358,19 @@ juce::ValueTree NoteModel::toValueTree() const
             child.setProperty (ids::kind, n.kind, nullptr);
         if (n.eq != defaults.eq)
             child.setProperty (ids::eq, eqToString (n.eq), nullptr);
+        if (n.hasDrawing())
+        {
+            // "cents cents n ..." (n = not drawn), 0.001-cent resolution.
+            juce::String d;
+            d.preallocateBytes (n.drawnCents.size() * 6);
+            for (size_t i = 0; i < n.drawnCents.size(); ++i)
+            {
+                if (i > 0) d << ' ';
+                const float v = n.drawnCents[i];
+                d << (std::isfinite (v) ? juce::String (v, 3) : juce::String ("n"));
+            }
+            child.setProperty (ids::drawn, d, nullptr);
+        }
 
         tree.appendChild (child, nullptr);
     }
@@ -352,6 +422,13 @@ int NoteModel::fromValueTree (const juce::ValueTree& tree)
             n.kind              = (int) child.getProperty (ids::kind, 0);
             if (child.hasProperty (ids::eq))
                 n.eq = eqFromString (child.getProperty (ids::eq).toString());
+            if (child.hasProperty (ids::drawn))
+            {
+                juce::StringArray parts;
+                parts.addTokens (child.getProperty (ids::drawn).toString(), " ", "");
+                for (const auto& p : parts)
+                    n.drawnCents.push_back (p == "n" ? std::numeric_limits<float>::quiet_NaN() : p.getFloatValue());
+            }
             clampEdits (n);
 
             loaded.push_back (n);

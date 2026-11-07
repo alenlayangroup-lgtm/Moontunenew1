@@ -180,22 +180,24 @@ bool MoonTuneAudioProcessor::isGridTriplet() const noexcept { return paramValue 
 bool MoonTuneAudioProcessor::isFollowPlayhead() const noexcept { return paramValue (parameters, ParamIDs::followPlayhead) >= 0.5f; }
 bool MoonTuneAudioProcessor::isAuditionEnabled() const noexcept { return paramValue (parameters, ParamIDs::audition) >= 0.5f; }
 
-void MoonTuneAudioProcessor::startAudition (double startSeconds, double endSeconds, bool loop)
+void MoonTuneAudioProcessor::startAudition (double startSeconds, double endSeconds, bool sustain, float pitch)
 {
     if (endSeconds <= startSeconds)
         return;
     previewMode.store (false);
     auditionStart.store ((juce::int64) (startSeconds * currentSampleRate));
     auditionEnd.store ((juce::int64) (endSeconds * currentSampleRate));
-    auditionLoop.store (loop);
+    auditionPitch.store (pitch);
+    auditionLoop.store (sustain);
     auditionActive.store (true);
     auditionRequest.fetch_add (1);
 }
 
-void MoonTuneAudioProcessor::updateAuditionRange (double startSeconds, double endSeconds)
+void MoonTuneAudioProcessor::updateAuditionRange (double startSeconds, double endSeconds, float pitch)
 {
     if (endSeconds <= startSeconds)
         return;
+    auditionPitch.store (pitch);
     auditionStart.store ((juce::int64) (startSeconds * currentSampleRate));
     auditionEnd.store ((juce::int64) (endSeconds * currentSampleRate));
 }
@@ -302,6 +304,18 @@ void MoonTuneAudioProcessor::startPreview (double seconds)
         return;
     startAudition (std::max (0.0, seconds), end, false);
     previewMode.store (true);
+}
+
+bool MoonTuneAudioProcessor::renderAudition (juce::AudioBuffer<float>& buffer, int numOut, int offset, int len, juce::int64 pos)
+{
+    const int channels = juce::jmin (numOut, buffer.getNumChannels());
+    if (channels <= 0 || len <= 0) return false;
+    float* ptrs[32] {};
+    for (int ch = 0; ch < channels && ch < 32; ++ch)
+        ptrs[ch] = buffer.getWritePointer (ch) + offset;
+    juce::AudioBuffer<float> view (ptrs, juce::jmin (channels, 32), len);
+    view.clear();
+    return renderer.processAudition (view, channels, pos, currentSampleRate);
 }
 
 juce::String MoonTuneAudioProcessor::getAraStatus() const { return araStatus; }
@@ -564,6 +578,13 @@ void MoonTuneAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     capture.prepare (sampleRate, samplesPerBlock);
     dryBuffer.setSize (juce::jmax (2, getTotalNumInputChannels(), getTotalNumOutputChannels()),
                        juce::jmax (1, samplesPerBlock), false, true, false);
+    {
+        int histLen = 1;
+        while (histLen < (int) (0.25 * sampleRate)) histLen <<= 1;   // >= 4 periods of a 32 Hz voice
+        auditionHistory.setSize (1, histLen, false, true, false);
+        analysisBuffer.setSize (1, HeldTone::maxWindow, false, true, false);
+        toneBuffer.setSize (1, juce::jmax (8192, samplesPerBlock), false, true, false);
+    }
     renderer.resetPlayback();
     setLatencySamples (0);
    #if JucePlugin_Enable_ARA
@@ -681,41 +702,119 @@ void MoonTuneAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         if (request != auditionSeen)
         {
             auditionSeen = request;
-            if (auditionActive.load()) { auditionPos = auditionStart.load(); auditionStopping = false; auditionFade = 0; }
-            else if (auditionPos > 0) { auditionStopping = true; auditionFade = (int) (0.015 * currentSampleRate); }
+            if (auditionActive.load()) { auditionPos = auditionStart.load(); auditionStopping = false; auditionFade = 0; heldTone.reset(); }
+            else if (auditionPos > 0) { auditionStopping = true; auditionFade = (int) (0.040 * currentSampleRate); }
         }
         if (auditionActive.load() || auditionStopping)
         {
             const int n = buffer.getNumSamples();
+            const double sr = currentSampleRate;
             const auto end = auditionEnd.load(), start = auditionStart.load();
             for (int ch = 0; ch < numOut; ++ch)
                 buffer.clear (ch, 0, n);
-            if (renderer.processAudition (buffer, numOut, auditionPos, currentSampleRate))
+
+            // Held note (like Melodyne): the onset plays once from the edited vocal, then one steady
+            // moment of the voice is held as a frozen harmonic tone (no loop, no repetition) at the
+            // edited pitch; the real voice crossfades into it in phase.
+            const float pitch = auditionPitch.load();
+            const double f0 = pitch > 1.0f ? 440.0 * std::pow (2.0, ((double) pitch - 69.0) / 12.0) : 0.0;
+            bool sustain = auditionLoop.load() && ! previewMode.load() && f0 > 0.0;
+            juce::int64 holdAt = 0, xfade = 1, window = 0;
+            if (sustain)
             {
-                const int fadeLen = juce::jmax (1, (int) (0.015 * currentSampleRate));
-                for (int i = 0; i < n; ++i)
+                const double period = sr / f0;
+                window = (juce::int64) std::llround (4.0 * period);
+                const juce::int64 len = end - start;
+                holdAt = start + std::max<juce::int64> (window + (juce::int64) (0.015 * sr), (juce::int64) (0.4 * (double) len));
+                xfade = std::min<juce::int64> ((juce::int64) (0.030 * sr), end - holdAt);
+                if (xfade < (juce::int64) (0.005 * sr) || window > auditionHistory.getNumSamples() / 2)
+                    sustain = false;   // too short to hold: plays once
+                heldTone.setPitch (f0);
+            }
+
+            const int fadeIn = juce::jmax (1, (int) (0.015 * sr));
+            const int release = juce::jmax (1, (int) (0.040 * sr));
+            const int histMask = auditionHistory.getNumSamples() - 1;
+            float* hist = auditionHistory.getWritePointer (0);
+            int done = 0;
+            while (done < n)
+            {
+                if (! auditionActive.load() && ! auditionStopping)
+                    break;
+                const bool holding = sustain && heldTone.isReady() && auditionPos >= holdAt;
+                int chunk = n - done;
+                if (sustain && auditionPos < holdAt)              chunk = (int) std::min<juce::int64> (chunk, holdAt - auditionPos);
+                else if (holding && auditionPos < holdAt + xfade) chunk = (int) std::min<juce::int64> (chunk, holdAt + xfade - auditionPos);
+                else if (! holding)                               chunk = (int) std::min<juce::int64> (chunk, std::max<juce::int64> (1, end - auditionPos));
+                chunk = juce::jlimit (1, toneBuffer.getNumSamples(), chunk);
+
+                const bool realNeeded = ! holding || auditionPos < holdAt + xfade;
+                const bool used = realNeeded && renderAudition (buffer, numOut, done, chunk, auditionPos);
+
+                if (sustain && auditionPos < holdAt)
+                    for (int i = 0; i < chunk; ++i)
+                    {
+                        float m = 0.0f;
+                        for (int ch = 0; ch < numOut; ++ch) m += buffer.getSample (ch, done + i);
+                        hist[(size_t) ((auditionPos + i) & histMask)] = m / (float) juce::jmax (1, numOut);
+                    }
+
+                float* tone = toneBuffer.getWritePointer (0);
+                if (holding)
+                    heldTone.render (tone, chunk);
+
+                for (int i = 0; i < chunk; ++i)
                 {
                     const auto pos = auditionPos + i;
                     float g = 1.0f;
-                    if (pos - start < fadeLen) g = (float) (pos - start) / (float) fadeLen;           // fade in
-                    if (end - pos < fadeLen) g = juce::jmin (g, (float) std::max<juce::int64> (0, end - pos) / (float) fadeLen);
-                    if (auditionStopping) g *= juce::jmax (0.0f, (float) (auditionFade - i) / (float) fadeLen);
+                    if (pos >= start && pos - start < fadeIn) g = (float) (pos - start) / (float) fadeIn;
+                    if (! holding && end - pos < fadeIn)
+                        g = juce::jmin (g, (float) std::max<juce::int64> (0, end - pos) / (float) fadeIn);
+                    if (auditionStopping)
+                        g *= juce::jmax (0.0f, (float) (auditionFade - i) / (float) release);
+                    float wTone = 0.0f;
+                    if (holding)
+                    {
+                        if (pos >= holdAt + xfade) wTone = 1.0f;
+                        else
+                        {
+                            const float sn = std::sin ((float) (pos - holdAt) / (float) xfade * juce::MathConstants<float>::halfPi);
+                            wTone = sn * sn;   // raised cosine (in phase: level stays)
+                        }
+                    }
                     for (int ch = 0; ch < numOut; ++ch)
-                        buffer.setSample (ch, i, buffer.getSample (ch, i) * g);
+                    {
+                        const float real = used ? buffer.getSample (ch, done + i) : 0.0f;
+                        buffer.setSample (ch, done + i, (real * (1.0f - wTone) + tone[i] * wTone) * g);
+                    }
+                }
+
+                auditionPos += chunk;
+                done += chunk;
+
+                // Freeze the moment just played (the last `window` samples before holdAt).
+                if (sustain && ! heldTone.isReady() && auditionPos == holdAt)
+                {
+                    float* w = analysisBuffer.getWritePointer (0);
+                    for (juce::int64 i = 0; i < window; ++i)
+                        w[(size_t) i] = hist[(size_t) ((holdAt - window + i) & histMask)];
+                    if (! heldTone.analyse (w, (int) window, f0, sr))
+                        sustain = false;   // not a steady voiced sound (e.g. "s"): plays once
+                }
+
+                if (auditionStopping)
+                {
+                    auditionFade -= chunk;
+                    if (auditionFade <= 0) { auditionStopping = false; auditionPos = 0; heldTone.reset(); break; }
+                }
+                else if (! (sustain && heldTone.isReady()) && ! (sustain && auditionPos < holdAt) && auditionPos >= end)
+                {
+                    if (auditionLoop.load() && ! sustain && f0 <= 0.0) auditionPos = start;   // no pitch: old repeat
+                    else { auditionActive.store (false); auditionPos = 0; heldTone.reset(); break; }
                 }
             }
-            auditionPos += n;
-            auditionSeconds.store ((double) auditionPos / currentSampleRate, std::memory_order_relaxed);
-            if (auditionStopping)
-            {
-                auditionFade -= n;
-                if (auditionFade <= 0) { auditionStopping = false; auditionPos = 0; }
-            }
-            else if (auditionPos >= end)
-            {
-                if (auditionLoop.load()) auditionPos = start;
-                else { auditionActive.store (false); auditionPos = 0; }
-            }
+            const auto shown = sustain && heldTone.isReady() ? std::min (auditionPos, holdAt) : auditionPos;
+            auditionSeconds.store ((double) shown / sr, std::memory_order_relaxed);
         }
     }
     else if (auditionActive.load())

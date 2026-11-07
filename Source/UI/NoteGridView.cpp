@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace moontune
 {
@@ -738,6 +739,23 @@ void NoteGridView::paintNoteShape (juce::Graphics& g, const Note& n, juce::Colou
     }
     g.setColour (Colours::text.withAlpha (0.9f));
     g.strokePath (path, juce::PathStrokeType (1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    // Pencil-drawn stretches on top, in the accent colour.
+    if (n.hasDrawing())
+    {
+        juce::Path drawn;
+        bool on = false;
+        for (size_t i = 0; i < curve.size(); ++i)
+        {
+            const int fi = f0 + (int) i;
+            const double ts = (double) fi * analysis->hopSeconds;
+            if (fi > f1 || ! std::isfinite (curve[i]) || ! std::isfinite (n.drawnAt (ts))) { on = false; continue; }
+            const juce::Point<float> pt (xAt (fi), pitchToY (curve[i] + octaveFix));
+            if (on) drawn.lineTo (pt); else { drawn.startNewSubPath (pt); on = true; }
+        }
+        g.setColour (Colours::accent);
+        g.strokePath (drawn, juce::PathStrokeType (2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
 }
 
 void NoteGridView::paintNotes (juce::Graphics& g, juce::Rectangle<int> area)
@@ -1180,7 +1198,8 @@ void NoteGridView::mouseMove (const juce::MouseEvent& e)
         if (tool == Tool::split && idx >= 0) { splitHoverX = e.position.x; splitHoverNote = notes[(size_t) idx].id; }
         else splitHoverX = -1.0f;
         if (! juce::exactlyEqual (oldX, splitHoverX)) repaint();
-        setMouseCursor (idx < 0 ? juce::MouseCursor::NormalCursor
+        setMouseCursor (tool == Tool::pencil ? juce::MouseCursor::CrosshairCursor
+                        : idx < 0 ? juce::MouseCursor::NormalCursor
                         : tool == Tool::split ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::UpDownResizeCursor);
         return;
     }
@@ -1235,6 +1254,18 @@ void NoteGridView::mouseDown (const juce::MouseEvent& e)
     int index = -1;
     const auto hit = hitTestNote (e.position, index);
 
+    // Pencil: draw (or with Ctrl/Cmd erase) the pitch curve over the notes under the stroke.
+    if (! e.mods.isPopupMenu() && tool == Tool::pencil)
+    {
+        dragOrigin = noteModel.getSnapshot();
+        drag = Drag::pencil;
+        if (history != nullptr)
+            history->beginGesture();
+        pencilLast = { (float) xToSeconds (e.position.x), yToPitch (e.position.y) };
+        applyPencil (pencilLast, pencilLast, e.mods.isCommandDown() || e.mods.isCtrlDown());
+        return;
+    }
+
     if (hit == Hit::modHandle || hit == Hit::driftHandle || hit == Hit::tiltHandle || hit == Hit::transitionHandle)
     {
         dragNoteId = notes[(size_t) index].id;
@@ -1272,7 +1303,7 @@ void NoteGridView::mouseDown (const juce::MouseEvent& e)
             history->beginGesture();
         if (onAuditionNote)
             if (const auto* n = findNote (notes, id))
-                onAuditionNote (n->outStart(), n->outEnd());
+                onAuditionNote (n->outStart(), n->outEnd(), displayPitch (*n));
         return;
     }
 
@@ -1288,6 +1319,8 @@ void NoteGridView::mouseDown (const juce::MouseEvent& e)
             const double frac = (outT - n.outStart()) / std::max (1.0e-6, n.outEnd() - n.outStart());
             showNoteMenu (n.id, n.startSeconds + frac * n.duration());
         }
+        else
+            showToolMenu();
         return;
     }
 
@@ -1319,14 +1352,14 @@ void NoteGridView::mouseDown (const juce::MouseEvent& e)
         history->beginGesture();
     if (onAuditionNote)
         if (const auto* n = findNote (notes, id))
-            onAuditionNote (n->outStart(), n->outEnd());
+            onAuditionNote (n->outStart(), n->outEnd(), displayPitch (*n));
 }
 
 void NoteGridView::auditionDragged()
 {
     if (onAuditionMove)
         if (const auto* n = findNote (notes, dragNoteId))
-            onAuditionMove (n->outStart(), n->outEnd());
+            onAuditionMove (n->outStart(), n->outEnd(), displayPitch (*n));
 }
 
 void NoteGridView::showScaleMenu (int pc)
@@ -1527,6 +1560,13 @@ void NoteGridView::mouseDrag (const juce::MouseEvent& e)
             applyDrag (e);
             return;
         }
+        case Drag::pencil:
+        {
+            const juce::Point<float> p { (float) xToSeconds (e.position.x), yToPitch (e.position.y) };
+            applyPencil (pencilLast, p, e.mods.isCommandDown() || e.mods.isCtrlDown());
+            pencilLast = p;
+            return;
+        }
         case Drag::pitch:
         case Drag::time:
         case Drag::startEdge:
@@ -1558,7 +1598,8 @@ void NoteGridView::mouseUp (const juce::MouseEvent& e)
 
     if (history != nullptr && history->isInGesture())
     {
-        const char* name = finished == Drag::pitch ? "Move pitch"
+        const char* name = finished == Drag::pencil ? "Draw pitch"
+                         : finished == Drag::pitch ? "Move pitch"
                          : finished == Drag::time ? "Move in time"
                          : finished == Drag::gain ? "Note gain"
                          : finished == Drag::tiltHandle ? "Pitch tilt"
@@ -1624,9 +1665,10 @@ bool NoteGridView::keyPressed (const juce::KeyPress& key)
     if (! mods.isAnyModifierKeyDown())
     {
         const auto ch = juce::CharacterFunctions::toUpperCase (key.getTextCharacter());
-        const Tool t = ch == 'E' ? Tool::edit : ch == 'S' ? Tool::split : ch == 'G' ? Tool::gain : tool;
-        if (t != tool || ch == 'E' || ch == 'S' || ch == 'G')
-            if (ch == 'E' || ch == 'S' || ch == 'G')
+        const Tool t = ch == 'E' ? Tool::edit : ch == 'S' ? Tool::split : ch == 'G' ? Tool::gain
+                     : ch == 'P' ? Tool::pencil : tool;
+        if (t != tool || ch == 'E' || ch == 'S' || ch == 'G' || ch == 'P')
+            if (ch == 'E' || ch == 'S' || ch == 'G' || ch == 'P')
             {
                 setTool (t);
                 if (onToolChanged) onToolChanged (tool);
@@ -1668,6 +1710,86 @@ bool NoteGridView::keyPressed (const juce::KeyPress& key)
     return false;
 }
 
+void NoteGridView::applyPencil (juce::Point<float> from, juce::Point<float> to, bool erase)
+{
+    if (from.x > to.x) std::swap (from, to);
+    const double t0 = from.x, t1 = to.x;
+    auto edited = noteModel.getSnapshot();
+    bool changed = false;
+    for (auto& n : edited)
+    {
+        if (! n.isNote() || n.outEnd() < t0 - 0.01 || n.outStart() > t1 + 0.01)
+            continue;
+        const double outLen = std::max (1.0e-6, n.outEnd() - n.outStart());
+        const double rate = n.duration() / outLen;   // source seconds per output second
+        const auto frames = (size_t) std::ceil (n.duration() / Note::drawHop) + 1;
+        if (n.drawnCents.size() < frames)
+            n.drawnCents.resize (frames, std::numeric_limits<float>::quiet_NaN());
+        const float centre = displayPitch (n);
+        // Frames under the stroke (at least the nearest one for a single click).
+        const double s0 = n.startSeconds + (t0 - n.outStart()) * rate, s1 = n.startSeconds + (t1 - n.outStart()) * rate;
+        long i0 = (long) std::ceil ((s0 - n.startSeconds) / Note::drawHop - 1.0e-9);
+        long i1 = (long) std::floor ((s1 - n.startSeconds) / Note::drawHop + 1.0e-9);
+        if (i1 < i0) i0 = i1 = (long) std::lround ((0.5 * (s0 + s1) - n.startSeconds) / Note::drawHop);
+        i0 = std::max (0L, i0);
+        i1 = std::min ((long) frames - 1, i1);
+        for (long i = i0; i <= i1; ++i)
+        {
+            const double outT = n.outStart() + (double) i * Note::drawHop / rate;
+            const double x = t1 > t0 ? juce::jlimit (0.0, 1.0, (outT - t0) / (t1 - t0)) : 0.5;
+            const float pitch = from.y + (to.y - from.y) * (float) x;
+            n.drawnCents[(size_t) i] = erase ? std::numeric_limits<float>::quiet_NaN() : 100.0f * (pitch - centre);
+            changed = true;
+        }
+        NoteModel::clampEdits (n);
+    }
+    if (! changed)
+        return;
+    if (history != nullptr && history->isInGesture())
+        history->updateGesture (std::move (edited));
+    else
+        noteModel.replaceAll (std::move (edited));
+    refreshNotes();
+}
+
+void NoteGridView::eraseDrawing (const std::set<juce::int64>& ids)
+{
+    auto all = noteModel.getSnapshot();
+    bool changed = false;
+    for (auto& n : all)
+        if ((ids.empty() || ids.count (n.id) != 0) && n.hasDrawing())
+        {
+            n.drawnCents.clear();
+            changed = true;
+        }
+    if (changed)
+        commit ("Erase pencil drawing", std::move (all));
+}
+
+void NoteGridView::showToolMenu()
+{
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("Tool");
+    menu.addItem (1, "Edit  (E)", true, tool == Tool::edit);
+    menu.addItem (2, "Scissors  (S)", true, tool == Tool::split);
+    menu.addItem (3, "Gain  (G)", true, tool == Tool::gain);
+    menu.addItem (4, "Pencil: draw pitch  (P)", true, tool == Tool::pencil);
+    bool anyDrawing = false;
+    for (const auto& n : notes) anyDrawing = anyDrawing || n.hasDrawing();
+    menu.addSeparator();
+    menu.addItem (5, selection.empty() ? "Erase all pencil drawing" : "Erase pencil drawing of the selection", anyDrawing);
+    juce::Component::SafePointer<NoteGridView> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(),
+                        [safe] (int choice)
+                        {
+                            if (safe == nullptr || choice == 0) return;
+                            if (choice == 5) { safe->eraseDrawing (safe->selection); return; }
+                            const Tool t = choice == 1 ? Tool::edit : choice == 2 ? Tool::split : choice == 3 ? Tool::gain : Tool::pencil;
+                            safe->setTool (t);
+                            if (safe->onToolChanged) safe->onToolChanged (t);
+                        });
+}
+
 void NoteGridView::showNoteMenu (juce::int64 noteId, double sourceSeconds)
 {
     if (const auto* obj = findNote (notes, noteId); obj != nullptr && ! obj->isNote())
@@ -1697,6 +1819,20 @@ void NoteGridView::showNoteMenu (juce::int64 noteId, double sourceSeconds)
     menu.addItem (11, "Reset pitch edits");
     menu.addItem (12, "Reset timing edits");
     menu.addItem (13, "Reset all edits");
+    {
+        bool anyDrawing = false;
+        for (const auto& n : notes)
+            if ((n.id == noteId || selection.count (n.id) != 0) && n.hasDrawing()) anyDrawing = true;
+        menu.addItem (14, "Erase pencil drawing", anyDrawing);
+    }
+    {
+        juce::PopupMenu tools;
+        tools.addItem (20, "Edit  (E)", true, tool == Tool::edit);
+        tools.addItem (21, "Scissors  (S)", true, tool == Tool::split);
+        tools.addItem (22, "Gain  (G)", true, tool == Tool::gain);
+        tools.addItem (23, "Pencil: draw pitch  (P)", true, tool == Tool::pencil);
+        menu.addSubMenu ("Tool", tools);
+    }
     menu.addSeparator();
     menu.addSectionHeader ("Fix analysis");
     menu.addItem (1, "Split note here");
@@ -1722,6 +1858,16 @@ void NoteGridView::showNoteMenu (juce::int64 noteId, double sourceSeconds)
                                 case 11: safe->resetEdits (true, false, false); break;
                                 case 12: safe->resetEdits (false, true, false); break;
                                 case 13: safe->resetEdits (true, true, true); break;
+                                case 14: safe->eraseDrawing (safe->selection.empty() ? std::set<juce::int64> { noteId }
+                                                                                     : safe->selection); break;
+                                case 20: case 21: case 22: case 23:
+                                {
+                                    const Tool t = choice == 20 ? Tool::edit : choice == 21 ? Tool::split
+                                                 : choice == 22 ? Tool::gain : Tool::pencil;
+                                    safe->setTool (t);
+                                    if (safe->onToolChanged) safe->onToolChanged (t);
+                                    break;
+                                }
                                 default: break;
                             }
                         });
@@ -1775,6 +1921,7 @@ void NoteGridView::resetEdits (bool pitch, bool time, bool sound)
         {
             n.pitchShiftCents = 0.0f; n.pitchModulation = 1.0f; n.pitchDrift = 1.0f;
             n.correctionCents = 0.0f; n.correctionDrift = 0.0f; n.correctionSpeedMs = 0.0f;
+            n.pitchTilt = 0.0f; n.transitionMs = -1.0f; n.drawnCents.clear();
         }
         if (time)
         {
@@ -1790,6 +1937,31 @@ void NoteGridView::resetEdits (bool pitch, bool time, bool sound)
 
 // Manual fixes of analysis errors (they change what was detected, not the sound).
 
+// Re-sample pencil drawings of `sources` onto `target`'s source range, keeping the drawn absolute
+// pitch (drawings are stored relative to their note's centre).
+static void rebaseDrawing (Note& target, std::initializer_list<const Note*> sources)
+{
+    bool any = false;
+    for (const auto* s : sources) any = any || s->hasDrawing();
+    if (! any) { target.drawnCents.clear(); return; }
+    const auto frames = (size_t) std::ceil ((target.endSeconds - target.startSeconds) / Note::drawHop) + 1;
+    std::vector<float> out (frames, std::numeric_limits<float>::quiet_NaN());
+    for (size_t i = 0; i < frames; ++i)
+    {
+        const double t = target.startSeconds + (double) i * Note::drawHop;
+        for (const auto* s : sources)
+            if (t >= s->startSeconds - 1.0e-9 && t <= s->endSeconds + 1.0e-9)
+            {
+                const float d = s->drawnAt (t);
+                if (std::isfinite (d))
+                    out[i] = d + 100.0f * (s->detectedPitch - target.detectedPitch) + (s->pitchShiftCents - target.pitchShiftCents);
+                break;
+            }
+    }
+    target.drawnCents = std::move (out);
+    NoteModel::clampEdits (target);
+}
+
 void NoteGridView::splitNoteAt (juce::int64 noteId, double seconds)
 {
     auto all = noteModel.getSnapshot();
@@ -1797,6 +1969,7 @@ void NoteGridView::splitNoteAt (juce::int64 noteId, double seconds)
     if (n == nullptr || ! n->isNote() || seconds - n->startSeconds < 0.05 || n->endSeconds - seconds < 0.05)
         return;
 
+    const Note before = *n;
     Note second = *n;
     second.id = noteModel.nextFreeId();
     second.startSeconds = seconds;
@@ -1808,6 +1981,8 @@ void NoteGridView::splitNoteAt (juce::int64 noteId, double seconds)
         n->detectedPitch = VocalAnalyzer::centrePitch (*analysis, n->startSeconds, n->endSeconds, n->detectedPitch);
         second.detectedPitch = VocalAnalyzer::centrePitch (*analysis, second.startSeconds, second.endSeconds, second.detectedPitch);
     }
+    rebaseDrawing (*n, { &before });
+    rebaseDrawing (second, { &before });
     all.push_back (second);
     const auto secondId = second.id;
     commit ("Split note", std::move (all));
@@ -1825,10 +2000,12 @@ void NoteGridView::mergeWithNext (juce::int64 noteId)
         const auto& b = all[i + 1];
         if (b.startSeconds - a.endSeconds > 0.3)
             return;   // a real gap: these are separate notes
+        const Note aBefore = a, bBefore = b;
         a.endSeconds = b.endSeconds;
         a.endEditSeconds = b.endEditSeconds + (b.timeShiftSeconds - a.timeShiftSeconds);
         if (analysis != nullptr)
             a.detectedPitch = VocalAnalyzer::centrePitch (*analysis, a.startSeconds, a.endSeconds, a.detectedPitch);
+        rebaseDrawing (a, { &aBefore, &bBefore });
         all.erase (all.begin() + (std::ptrdiff_t) i + 1);
         commit ("Merge notes", std::move (all));
         setSelection ({ noteId });
