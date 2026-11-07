@@ -74,7 +74,8 @@ private:
     juce::ComboBox gridBox;
     juce::ToggleButton tripletButton { "3" }, followButton { "FOLLOW" }, auditionButton { "AUDITION" };
     juce::TextButton showAllButton { "SHOW ALL" };
-    juce::TextButton editToolButton { "EDIT" }, splitToolButton { "SPLIT" }, gainToolButton { "GAIN" };
+    juce::TextButton editToolButton { "EDIT" }, splitToolButton { "SPLIT" }, gainToolButton { "GAIN" },
+                     pencilToolButton { "PENCIL" };
     juce::ToggleButton waveButton { "WAVE" };
     juce::TextButton playButton { "PLAY" }, breathButton { "BREATH" };
     double locator = -1.0;          // play-from marker set by a ruler click (-1 = play from the DAW cursor)

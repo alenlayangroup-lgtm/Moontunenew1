@@ -7,6 +7,8 @@
 namespace moontune
 {
 
+static double midiToHzD (double m) { return 440.0 * std::pow (2.0, (m - 69.0) / 12.0); }
+
 namespace
 {
     constexpr float candidateThreshold = 0.5f;   // CMNDF dips above this are not period candidates
@@ -348,9 +350,45 @@ void PitchDetector::analyse (const float* samples, int numSamples, double sample
             smoothed[(size_t) fi] = std::max (std::min (a, b), std::min (std::max (a, b), c));
         }
     }
+    // Time alignment. The difference function compares x[j] with x[j + tau] for j < W from the
+    // segment start, so a period tau is measured around (W + tau) / 2 into the segment, while the
+    // segment is centred at (W + maxLag) / 2: the value belongs to (maxLag - tau) / 2 samples
+    // *before* the frame time (~6 ms for a 300 Hz voice). Re-sample each voiced run so every frame
+    // carries the pitch at its own time (vibrato and fast movements line up with the audio).
+    std::vector<float> aligned = smoothed;
+    for (int fi = 0; fi < count;)
+    {
+        if (! isVoiced (firstFrame + fi)) { ++fi; continue; }
+        int f2 = fi;
+        while (f2 < count && isVoiced (firstFrame + f2)) ++f2;
+        // Frame k's value belongs to time position pos[k] = k - delay[k] (in frames).
+        for (int k = fi; k < f2; ++k)
+        {
+            const float target = (float) k;
+            // Find j with pos[j] <= target < pos[j+1] (pos is increasing: delay changes slowly).
+            auto posOf = [&] (int j)
+            {
+                const double tau = fs / midiToHzD ((double) smoothed[(size_t) j]);
+                return (double) j - 0.5 * ((double) maxLag - tau) / fs / hop;
+            };
+            int j = k;
+            while (j + 1 < f2 && posOf (j + 1) <= target) ++j;
+            while (j > fi && posOf (j) > target) --j;
+            const double pj = posOf (j);
+            if (j + 1 < f2 && pj <= target)
+            {
+                const double pn = posOf (j + 1);
+                const double x = pn > pj ? juce::jlimit (0.0, 1.0, (target - pj) / (pn - pj)) : 0.0;
+                aligned[(size_t) k] = (float) (smoothed[(size_t) j] + (smoothed[(size_t) j + 1] - smoothed[(size_t) j]) * x);
+            }
+            else
+                aligned[(size_t) k] = smoothed[(size_t) j];   // run edge: hold the nearest value
+        }
+        fi = f2;
+    }
     for (int fi = 0; fi < count; ++fi)
         if (isVoiced (firstFrame + fi))
-            frames[(size_t) (firstFrame + fi)].pitch = smoothed[(size_t) fi];
+            frames[(size_t) (firstFrame + fi)].pitch = aligned[(size_t) fi];
 }
 
 } // namespace moontune

@@ -46,7 +46,7 @@ struct NoiseRegion
 
 struct AnalysisResult
 {
-    static constexpr int analyzerVersion = 2;   // bump when results change
+    static constexpr int analyzerVersion = 3;   // bump when results change
 
     double hopSeconds = 0.005;
     std::vector<AnalysisFrame> frames;          // frame i is centred at i * hopSeconds

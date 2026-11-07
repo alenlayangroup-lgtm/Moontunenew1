@@ -25,7 +25,7 @@ namespace
             return false;
         return std::abs (n.pitchShiftCents) > 0.01f || std::abs (n.pitchModulation - 1.0f) > 0.001f
             || std::abs (n.pitchDrift - 1.0f) > 0.001f || std::abs (n.pitchTilt) > 0.01f
-            || n.transitionMs >= 0.0f || (o.scaleCorrection && n.hasCorrection());
+            || n.transitionMs >= 0.0f || (o.scaleCorrection && n.hasCorrection()) || n.hasDrawing();
     }
 
     // Vibrato-free pitch inside a note: moving average (~155 ms) over its voiced frames.
@@ -691,6 +691,16 @@ std::vector<float> VocalRenderer::notePitchCurve (const Note& n, const AnalysisR
             p += (float) ((frac - 0.5) * n.pitchTilt / 100.0);
         }
         out[i] = p + offset;
+        if (o.pitch && ! n.drawnCents.empty())
+        {
+            const double ts = (double) (f0 + (int) i) * a.hopSeconds;
+            const float d = n.drawnAt (ts);
+            if (std::isfinite (d))
+            {
+                const float w = n.drawnWeight (ts);
+                out[i] += (n.detectedPitch + offset + d / 100.0f - out[i]) * w;
+            }
+        }
     }
     return out;
 }
@@ -767,6 +777,8 @@ std::shared_ptr<RenderedAudio> VocalRenderer::render (const TakeAudio& take, con
         const int K = (int) std::ceil (reSec / hop) + 2 - k0;
         std::vector<float> offset ((size_t) K, 0.0f), extra ((size_t) K, 0.0f), formant ((size_t) K, 0.0f),
                            gain ((size_t) K, 0.0f), deviation ((size_t) K, 0.0f);
+        // Pencil: shift that puts the voice exactly on the drawn pitch, and its weight (0 = none).
+        std::vector<float> drawShift ((size_t) K, 0.0f), drawW ((size_t) K, 0.0f);
 
         for (int k = 0; k < K; ++k)
         {
@@ -793,6 +805,25 @@ std::shared_ptr<RenderedAudio> VocalRenderer::render (const TakeAudio& take, con
 
                 const float drift = owner->pitchDrift * (1.0f - ((options.pitch && options.scaleCorrection) ? owner->correctionDrift : 0.0f));
                 const float mod = owner->pitchModulation;
+                if (options.pitch && ! owner->drawnCents.empty())
+                {
+                    const float d = owner->drawnAt (ts);
+                    const double tl = ts;
+                    const int fa = (int) std::floor (tl / analysis.hopSeconds);
+                    if (std::isfinite (d) && fa >= 0 && fa + 1 < (int) analysis.frames.size())
+                    {
+                        const auto& f = analysis.frames[(size_t) fa];
+                        const auto& g2 = analysis.frames[(size_t) fa + 1];
+                        if (f.cls == FrameClass::Voiced && std::isfinite (f.pitch) && g2.cls == FrameClass::Voiced && std::isfinite (g2.pitch))
+                        {
+                            const float x = (float) (tl / analysis.hopSeconds - fa);
+                            const float sung = f.pitch + (g2.pitch - f.pitch) * x;   // sung pitch at ts
+                            // Target = note centre (with its move) + drawn cents; shift = target - sung.
+                            drawShift[(size_t) k] = offset[(size_t) k] + d - 100.0f * (sung - owner->detectedPitch);
+                            drawW[(size_t) k] = owner->drawnWeight (ts);
+                        }
+                    }
+                }
                 if (options.pitch && std::abs (owner->pitchTilt) > 0.01f)
                 {
                     // Tilt: a straight slope across the note, faded in/out over 30 ms at its edges.
@@ -882,6 +913,8 @@ std::shared_ptr<RenderedAudio> VocalRenderer::render (const TakeAudio& take, con
         for (int k = 0; k < K; ++k)
         {
             shift[(size_t) k] = offset[(size_t) k] + extra[(size_t) k];
+            if (drawW[(size_t) k] > 0.0f)
+                shift[(size_t) k] += (drawShift[(size_t) k] - shift[(size_t) k]) * drawW[(size_t) k];
             formantTotal[(size_t) k] = formant[(size_t) k] + (options.preserveFormants ? 0.0f : shift[(size_t) k]);
             active[(size_t) k] = std::abs (shift[(size_t) k]) > 0.5f || std::abs (formantTotal[(size_t) k]) > 0.5f
                               || deviation[(size_t) k] > 0.5f;

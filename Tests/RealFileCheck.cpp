@@ -99,6 +99,24 @@ public:
             notes.push_back (n);
         }
 
+        // Pencil demo (MOONTUNE_REAL_DRAW=1): on the three longest notes a straight drawn line from the
+        // note's pitch at its start rising one semitone to its end (vibrato replaced by the line).
+        if (std::getenv ("MOONTUNE_REAL_DRAW") != nullptr)
+        {
+            std::vector<size_t> order (notes.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::sort (order.begin(), order.end(), [&] (size_t a, size_t b) { return notes[a].duration() > notes[b].duration(); });
+            for (size_t k = 0; k < std::min<size_t> (3, order.size()); ++k)
+            {
+                auto& n = notes[order[k]];
+                const auto frames = (size_t) std::ceil (n.duration() / Note::drawHop) + 1;
+                n.drawnCents.resize (frames);
+                for (size_t i = 0; i < frames; ++i)
+                    n.drawnCents[i] = 100.0f * (float) i / (float) (frames - 1) - 50.0f;
+                logMessage (juce::String::formatted ("  pencil line on note %.3f-%.3f", n.startSeconds, n.endSeconds));
+            }
+        }
+
         for (const auto& nz : analysis.noise)
             logMessage (juce::String::formatted ("  noise %.3f-%.3f  %s", nz.startSeconds, nz.endSeconds,
                                                  nz.kind == NoiseRegion::breath ? "breath" : nz.kind == NoiseRegion::sibilant ? "sibilant" : "plosive"));

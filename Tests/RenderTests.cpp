@@ -1,4 +1,5 @@
 #include "DSP/VocalRenderer.h"
+#include "Model/NoteModel.h"
 #include "DSP/Resampler.h"
 #include "DSP/TimeMap.h"
 #include "Analysis/VocalAnalyzer.h"
@@ -6,6 +7,7 @@
 
 #include <juce_dsp/juce_dsp.h>
 #include <cmath>
+#include <limits>
 
 using namespace moontune;
 using namespace moontune::testsignals;
@@ -375,6 +377,63 @@ public:
                 r = VocalAnalyzer::analyseBuffer (y.data(), (int) y.size(), sr);
                 if (r.notes.size() == 1)
                     expectGreaterThan (r.notes[0].vibratoExtentCents, s.analysis.notes[0].vibratoExtentCents * 1.25f);
+            }
+        }
+
+        beginTest ("Pencil: the voice follows the drawn pitch exactly; undrawn parts untouched");
+        {
+            const double sr = 48000.0;
+            auto s = makeSetup ({ { 0.2, 1.8, 62, 5.5, 90 } }, sr, 2.0);   // vibrato note
+            expectEquals ((int) s.notes.size(), 1);
+            if (s.notes.size() == 1)
+            {
+                auto drawn = s.notes;
+                auto& n = drawn[0];
+                const auto frames = (size_t) std::ceil (n.duration() / Note::drawHop) + 1;
+                n.drawnCents.assign (frames, std::numeric_limits<float>::quiet_NaN());
+                // 0.6 .. 1.2 s: a straight line from 61.0 up to 63.0 (vibrato replaced by the line).
+                for (size_t i = 0; i < frames; ++i)
+                {
+                    const double t = n.startSeconds + (double) i * Note::drawHop;
+                    if (t >= 0.6 && t <= 1.2)
+                        n.drawnCents[i] = 100.0f * ((61.0f + 2.0f * (float) ((t - 0.6) / 0.6)) - n.detectedPitch);
+                }
+                expect (n.hasDrawing());
+                expect (VocalRenderer::needsRender (drawn, {}));
+                auto y = renderWith (s, drawn);
+                auto r = VocalAnalyzer::analyseBuffer (y.data(), (int) y.size(), sr);
+                float worst = 0.0f;
+                for (double t = 0.65; t <= 1.15; t += 0.01)
+                {
+                    const auto* f = r.frameAt (t);
+                    if (f == nullptr || f->cls != FrameClass::Voiced) continue;
+                    const float want = 61.0f + 2.0f * (float) ((t - 0.6) / 0.6);
+                    worst = std::max (worst, std::abs (f->pitch - want));
+                }
+                logMessage ("  pencil: worst deviation from the drawn line = " + juce::String (worst * 100.0f, 1) + " cents");
+                expectLessThan (worst, 0.05f);
+                // Outside the drawing the vibrato stays where it was.
+                for (double t : { 0.35, 0.45, 1.45, 1.6 })
+                {
+                    const auto* a = s.analysis.frameAt (t);
+                    const auto* b = r.frameAt (t);
+                    if (a != nullptr && b != nullptr && a->cls == FrameClass::Voiced && b->cls == FrameClass::Voiced)
+                        expectWithinAbsoluteError (b->pitch, a->pitch, 0.1f, "undrawn at " + juce::String (t));
+                }
+                expectLessThan (maxStep (y, 0.3, 1.7, sr), 0.2f, "clicks");   // no clicks at the edges of the drawing
+                // The displayed curve shows the drawing.
+                const auto curve = VocalRenderer::notePitchCurve (n, s.analysis, {});
+                const int fA = s.analysis.frameIndexAt (n.startSeconds), fm = s.analysis.frameIndexAt (0.9);
+                if (fm - fA >= 0 && fm - fA < (int) curve.size())
+                    expectWithinAbsoluteError (curve[(size_t) (fm - fA)], 62.0f, 0.05f, "display curve");
+
+                // Saved and loaded with the project.
+                NoteModel m1, m2;
+                m1.replaceAll (drawn);
+                expectEquals (m2.fromValueTree (m1.toValueTree()), 0);
+                const auto back = m2.getSnapshot();
+                expect (back.size() == 1, "loaded note count");
+                if (back.size() == 1) expect (back[0] == drawn[0], "loaded drawing equals");
             }
         }
 
